@@ -1,5 +1,18 @@
 # YouTubearr Changelog
 
+## [1.16.1] - 2026-03-28
+
+### Updated
+
+- **yt-dlp**: Updated bundled yt-dlp to 2026.03.17 (was 2026.03.04)
+  - YouTube `webpage_client` fixes
+  - `--live-from-start` improvements
+  - EJS updated to 0.8.0
+
+### Changed
+
+- **Release process**: Added dependency update check to release checklist in claude.md
+
 ## [1.16.0] - 2026-03-28
 
 ### Added
