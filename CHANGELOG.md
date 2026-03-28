@@ -1,5 +1,11 @@
 # YouTubearr Changelog
 
+## [1.16.2] - 2026-03-28
+
+### Fixed
+
+- **False notifications on stream re-add**: Fixed bug where Telegram notifications were sent when a stream was re-added after its channel was deleted (due to transient yt-dlp issues or cleanup). Notifications now only fire for truly new streams, not re-adds.
+
 ## [1.16.1] - 2026-03-28
 
 ### Updated

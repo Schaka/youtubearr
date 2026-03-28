@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.1"
+    version = "1.16.2"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -1643,6 +1643,7 @@ class Plugin:
 
                     # Check if stream is in tracked_streams
                     is_tracked = video_id in tracked_streams
+                    is_readd = False  # Track if this is a re-add (was tracked but channel deleted)
 
                     # If tracked, verify the Dispatcharr channel still exists
                     if is_tracked:
@@ -1699,8 +1700,9 @@ class Plugin:
                             del tracked_streams[video_id]
                             self._persist_settings({"tracked_streams": tracked_streams})
                             is_tracked = False
+                            is_readd = True  # Don't send notification for re-adds
 
-                    self._log(f"Processing stream {video_id}: in_tracked={is_tracked}")
+                    self._log(f"Processing stream {video_id}: in_tracked={is_tracked}, is_readd={is_readd}")
                     if video_id and not is_tracked:
                         # New livestream detected
                         self._log(f"New stream detected: {video_id}, extracting metadata...")
@@ -1753,8 +1755,11 @@ class Plugin:
                                 added_count += 1
                                 self._log(f"Auto-added stream: {metadata.get('title')} (Channel #{channel.channel_number})")
 
-                                # Send Telegram notification (use channel.uuid for Dispatcharr URL)
-                                self._send_telegram_notification(settings, video_id, metadata, channel.channel_number, str(channel.uuid))
+                                # Send Telegram notification only for truly new streams, not re-adds
+                                if not is_readd:
+                                    self._send_telegram_notification(settings, video_id, metadata, channel.channel_number, str(channel.uuid))
+                                else:
+                                    self._log(f"Skipping notification for re-added stream: {video_id}")
 
                             except Exception as exc:
                                 self._log_error(f"Failed to add stream {video_id}: {exc}")
