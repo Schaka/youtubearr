@@ -1,5 +1,37 @@
 # YouTubearr Changelog
 
+## [1.16.0] - 2026-03-28
+
+### Added
+
+- **Celery Beat Auto-Recovery (Issue #10)**: Monitoring thread health is now checked every 5 minutes via Celery beat. If the monitoring thread dies (crash, timeout, hang), it automatically restarts without requiring a page view. This eliminates the need to manually visit the plugin page after container restarts.
+  - New `check_plugin_health` Celery task added to Dispatcharr core
+  - Plugin registers/unregisters with Celery beat when monitoring starts/stops
+
+- **Channel Profile Auto-Add (Issue #6)**: New "Channel Profile" setting allows specifying which Dispatcharr Channel Profile to automatically add created channels to (e.g., "Primary"). Leave empty to skip.
+
+### Fixed
+
+- **Skip URL Refresh on Manual Refresh (Issue #8)**: The "Refresh Now" button no longer triggers URL refresh, which could cause 504 Gateway Timeouts due to sequential yt-dlp calls. URL refresh still happens automatically in the monitoring loop.
+
+- **Duplicate Channel Numbers**: Fixed a bug where multiple streams from the same YouTube channel could all receive the same sub-channel number (e.g., all 91.1 instead of 91.1, 91.2, 91.3). Added in-memory tracking of assigned channel numbers during each poll cycle.
+
+- **Reset All Not Clearing tracked_streams**: Fixed a Django JSONField issue where in-place modification of settings wasn't properly saved. Reset All now creates a new settings dict to ensure the change is detected and persisted.
+
+- **Hardcoded Channel Group Name**: Fixed inconsistency where Reset All, Refresh, and poll functions used hardcoded "YouTube Live" group name instead of reading from settings. Now all functions consistently use the user-configured channel group name.
+
+### Changed
+
+- Status and start monitoring handlers now read fresh settings from the database to avoid stale state issues
+
+## [1.15.1] - 2026-03-28
+
+### Fixed - Monitoring Auto-Recovery
+
+**Bug:** Monitoring loop could stop running but not auto-restart on status check. The auto-restart logic checked an in-memory flag (`self._monitoring_active`) which could be stale if the thread crashed or hung.
+
+**Fix:** Auto-restart now checks `thread.is_alive()` instead of the in-memory flag. This correctly detects when the monitoring thread has died (from crashes, hangs, or unexpected exits) and restarts it automatically when viewing the plugin status page.
+
 ## [1.15.0] - 2026-03-21
 
 ### Changed - Code Cleanup & Reliability Improvements

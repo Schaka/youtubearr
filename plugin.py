@@ -16,14 +16,15 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.plugins.models import PluginConfig
-from apps.channels.models import Channel, ChannelGroup, ChannelStream, Stream, Logo
+from apps.channels.models import Channel, ChannelGroup, ChannelStream, Stream, Logo, ChannelProfile, ChannelProfileMembership
 from apps.epg.models import EPGData, EPGSource, ProgramData
 from core.models import StreamProfile
+from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.15.0"
+    version = "1.16.0"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -105,6 +106,13 @@ class Plugin:
             "type": "string",
             "default": "YouTube Live",
             "help_text": "Group name for created channels",
+        },
+        {
+            "id": "channel_profile_name",
+            "label": "Channel Profile",
+            "type": "string",
+            "default": "",
+            "help_text": "Name of Channel Profile to add created channels to (e.g., 'Primary'). Leave empty to skip.",
         },
         {
             "id": "starting_channel_number",
@@ -276,6 +284,9 @@ class Plugin:
         # Stream profile cache
         self._stream_profile_id: Optional[int] = None
 
+        # Track assigned channel numbers during poll cycle to avoid duplicates
+        self._assigned_channel_numbers: set = set()
+
         # Field defaults
         self._field_defaults = {field["id"]: field.get("default") for field in self.fields}
 
@@ -330,7 +341,14 @@ class Plugin:
 
     def _handle_status(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Return current status"""
-        settings = context.get("settings", {})
+        # IMPORTANT: Always read fresh settings from DB for auto-restart check
+        # Context settings may be stale (e.g., from Celery beat health check)
+        try:
+            cfg = PluginConfig.objects.get(key=self._plugin_key)
+            settings = dict(cfg.settings or {})
+        except PluginConfig.DoesNotExist:
+            settings = context.get("settings", {})
+
         tracked_streams = settings.get("tracked_streams", {})
         monitoring_active = settings.get("monitoring_active", False)
 
@@ -342,8 +360,9 @@ class Plugin:
             }
 
         # Auto-restart monitoring if DB says active but thread isn't running
-        # This handles container/service restarts
-        if monitoring_active and not self._monitoring_active:
+        # This handles container/service restarts AND crashed/hung threads
+        thread_dead = not self._monitor_thread or not self._monitor_thread.is_alive()
+        if monitoring_active and thread_dead:
             channels = settings.get("monitored_channels", "").strip()
             if channels and self._ytdlp_path:
                 self._log("Auto-restarting monitoring after service restart")
@@ -356,6 +375,8 @@ class Plugin:
                     name="YouTubearr-Monitor"
                 )
                 self._monitor_thread.start()
+                # Ensure Celery beat health check is registered (idempotent)
+                self._register_celery_health_check()
 
         message_parts = []
         if monitoring_active:
@@ -424,7 +445,8 @@ class Plugin:
 
                         # Check if there's already another channel with this video before re-adding
                         try:
-                            channel_group = ChannelGroup.objects.get(name=self._channel_group_name)
+                            group_name = settings.get("channel_group_name", self._channel_group_name)
+                            channel_group = ChannelGroup.objects.get(name=group_name)
                             existing_channel = None
                             for ch in Channel.objects.filter(channel_group=channel_group):
                                 for stream in ch.streams.all():
@@ -541,9 +563,16 @@ class Plugin:
                 "message": "yt-dlp not found (bundled version may not be working). Check logs.",
             }
 
-        settings = context.get("settings", {})
+        # Read fresh settings from DB to avoid stale state
+        try:
+            cfg = PluginConfig.objects.get(key=self._plugin_key)
+            settings = dict(cfg.settings or {})
+        except PluginConfig.DoesNotExist:
+            settings = context.get("settings", {})
 
-        if settings.get("monitoring_active"):
+        # Check if already active (use both DB flag AND thread state)
+        thread_alive = self._monitor_thread and self._monitor_thread.is_alive()
+        if settings.get("monitoring_active") and thread_alive:
             return {"status": "running", "message": "Monitoring already active"}
 
         monitored = settings.get("monitored_channels", "").strip()
@@ -571,6 +600,9 @@ class Plugin:
         self._monitor_thread.start()
 
         self._log("Monitoring started")
+
+        # Register Celery beat health check for auto-recovery
+        self._register_celery_health_check()
 
         return {
             "status": "running",
@@ -602,6 +634,9 @@ class Plugin:
 
         self._log("Monitoring stopped")
 
+        # Unregister Celery beat health check
+        self._unregister_celery_health_check()
+
         return {
             "status": "stopped",
             "message": "Monitoring stopped",
@@ -622,8 +657,9 @@ class Plugin:
             # Run one poll cycle
             added, ended = self._poll_monitored_channels(settings)
 
-            # Refresh URLs
-            refreshed = self._refresh_expiring_urls(settings)
+            # NOTE: URL refresh skipped on manual Refresh to avoid 504 timeouts (#8)
+            # URL refresh happens automatically in the monitoring loop
+            refreshed = 0
 
             # Cleanup if enabled
             cleaned = 0
@@ -635,8 +671,6 @@ class Plugin:
                 message_parts.append(f"{added} stream(s) added")
             if ended > 0:
                 message_parts.append(f"{ended} stream(s) ended")
-            if refreshed > 0:
-                message_parts.append(f"{refreshed} URL(s) refreshed")
             if cleaned > 0:
                 message_parts.append(f"{cleaned} channel(s) cleaned up")
 
@@ -707,8 +741,12 @@ class Plugin:
             try:
                 cfg = PluginConfig.objects.get(key=self._plugin_key)
                 tracked_count = len(cfg.settings.get("tracked_streams", {}))
-                cfg.settings["monitoring_active"] = False
-                cfg.settings["tracked_streams"] = {}  # Clear immediately to prevent re-adds
+                # IMPORTANT: Create new dict to ensure Django detects the change
+                # (In-place modification of JSONField may not trigger save properly)
+                new_settings = dict(cfg.settings or {})
+                new_settings["monitoring_active"] = False
+                new_settings["tracked_streams"] = {}  # Clear immediately to prevent re-adds
+                cfg.settings = new_settings  # Assign new dict object
                 cfg.save(update_fields=["settings", "updated_at"])
                 self._log(f"Reset All: Set monitoring_active=False and cleared {tracked_count} tracked_streams")
             except PluginConfig.DoesNotExist:
@@ -724,9 +762,10 @@ class Plugin:
             time.sleep(3)
             self._log("Reset All: Waited for monitoring thread to stop")
 
-            # Step 4: Get the channel group
+            # Step 4: Get the channel group (read from settings, not hardcoded)
+            group_name = context.get("settings", {}).get("channel_group_name", self._channel_group_name)
             try:
-                channel_group = ChannelGroup.objects.get(name=self._channel_group_name)
+                channel_group = ChannelGroup.objects.get(name=group_name)
             except ChannelGroup.DoesNotExist:
                 channel_group = None
 
@@ -1010,7 +1049,7 @@ class Plugin:
             url=stream_url,
             logo_url=thumbnail if thumbnail else None,
             tvg_id=None,
-            stream_profile_id=self._get_stream_profile_id(),
+            stream_profile_id=self._get_stream_profile_id(settings),
         )
 
         # Get or create channel group
@@ -1065,8 +1104,11 @@ class Plugin:
             channel_number=channel_number,
             channel_group=group,
             logo=logo,
-            stream_profile_id=self._get_stream_profile_id(),
+            stream_profile_id=self._get_stream_profile_id(settings),
         )
+
+        # Track this channel number to avoid duplicates in same poll cycle
+        self._assigned_channel_numbers.add(channel_number)
 
         # Auto-create and assign EPG if configured
         epg_source_name = settings.get("epg_source_name", "YouTube Live").strip()
@@ -1127,6 +1169,23 @@ class Plugin:
             stream=stream,
             defaults={"order": 0}
         )
+
+        # Add to Channel Profile if configured
+        channel_profile_name = settings.get("channel_profile_name", "").strip()
+        if channel_profile_name:
+            try:
+                profile = ChannelProfile.objects.filter(name__iexact=channel_profile_name).first()
+                if profile:
+                    ChannelProfileMembership.objects.get_or_create(
+                        channel_profile=profile,
+                        channel=channel,
+                        defaults={"enabled": True}
+                    )
+                    self._log(f"Added channel to profile '{profile.name}'")
+                else:
+                    self._log(f"Warning: Channel Profile '{channel_profile_name}' not found")
+            except Exception as profile_exc:
+                self._log_error(f"Failed to add channel to profile: {profile_exc}")
 
         return stream, channel
 
@@ -1255,6 +1314,15 @@ class Plugin:
                         pass
         except ChannelGroup.DoesNotExist:
             pass
+
+        # Also check channel numbers assigned during this poll cycle (not yet committed to DB)
+        for ch_num in self._assigned_channel_numbers:
+            try:
+                ch_float = float(ch_num)
+                if base_number <= ch_float < base_number + 1:
+                    existing_subchannels.append(ch_float)
+            except (TypeError, ValueError):
+                pass
 
         # Remove duplicates
         existing_subchannels = list(set(existing_subchannels))
@@ -1466,12 +1534,28 @@ class Plugin:
         """
         return float(self._get_next_unmapped_base_number(settings)) + 0.1
 
-    def _get_stream_profile_id(self) -> int:
-        """Get or find a suitable stream profile ID"""
+    def _get_stream_profile_id(self, settings: Optional[Dict[str, Any]] = None) -> int:
+        """Get or find a suitable stream profile ID.
+
+        Args:
+            settings: Plugin settings dict. If stream_profile_name is set, use that profile.
+        """
+        # Check for user-configured profile name first
+        if settings:
+            profile_name = settings.get("stream_profile_name", "").strip()
+            if profile_name:
+                profile = StreamProfile.objects.filter(name__iexact=profile_name).first()
+                if profile:
+                    self._log(f"Using configured stream profile: {profile.name}")
+                    return profile.id
+                else:
+                    self._log(f"Warning: Stream profile '{profile_name}' not found, falling back to auto-detect")
+
+        # Use cached profile ID if available
         if self._stream_profile_id is not None:
             return self._stream_profile_id
 
-        # Try to find "proxy" profile (as used by WeatharrStation)
+        # Try to find "proxy" profile (common default)
         profile = (
             StreamProfile.objects.filter(name__iexact="proxy").first()
             or StreamProfile.objects.filter(name__icontains="proxy").first()
@@ -1493,6 +1577,9 @@ class Plugin:
 
         Uses yt-dlp flat-playlist to detect live streams - NO YouTube API quota required!
         """
+        # Clear assigned channel numbers at start of poll cycle to avoid duplicates
+        self._assigned_channel_numbers.clear()
+
         self._log("=== Starting poll cycle (yt-dlp mode - no API quota) ===")
 
         # Parse monitored channels
@@ -1570,7 +1657,8 @@ class Plugin:
                             # Check if there's already another channel with this video before re-adding
                             # Look for channels in our group that have a stream containing this video ID
                             try:
-                                channel_group = ChannelGroup.objects.get(name=self._channel_group_name)
+                                group_name = settings.get("channel_group_name", self._channel_group_name)
+                                channel_group = ChannelGroup.objects.get(name=group_name)
                                 existing_channel = None
                                 for ch in Channel.objects.filter(channel_group=channel_group):
                                     for stream in ch.streams.all():
@@ -2339,6 +2427,33 @@ class Plugin:
                     self._log(f"Telegram notification returned HTTP {status}")
         except Exception as exc:
             self._log_error(f"Failed to send Telegram notification: {exc}")
+
+    # --- Celery Beat Scheduling ---
+
+    def _register_celery_health_check(self) -> None:
+        """Register periodic health check with Celery beat (runs every 5 minutes)"""
+        try:
+            task_name = f"youtubearr_{self._plugin_key}_health_check"
+            create_or_update_periodic_task(
+                task_name=task_name,
+                celery_task_path="core.tasks.check_plugin_health",
+                kwargs={"plugin_key": self._plugin_key},
+                cron_expression="*/5 * * * *",  # Every 5 minutes
+                enabled=True,
+            )
+            self._log(f"Registered Celery beat health check: {task_name}")
+        except Exception as exc:
+            self._log_error(f"Failed to register Celery health check: {exc}")
+
+    def _unregister_celery_health_check(self) -> None:
+        """Unregister periodic health check from Celery beat"""
+        try:
+            task_name = f"youtubearr_{self._plugin_key}_health_check"
+            deleted = delete_periodic_task(task_name)
+            if deleted:
+                self._log(f"Unregistered Celery beat health check: {task_name}")
+        except Exception as exc:
+            self._log_error(f"Failed to unregister Celery health check: {exc}")
 
     def _log(self, message: str) -> None:
         """Write log message"""
