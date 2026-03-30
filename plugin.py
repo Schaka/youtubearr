@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.2"
+    version = "1.16.4"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -359,10 +359,33 @@ class Plugin:
                 "message": "yt-dlp not found (bundled version may not be working). Check logs.",
             }
 
-        # Auto-restart monitoring if DB says active but thread isn't running
+        # Auto-restart monitoring if DB says active but no thread is actually running
         # This handles container/service restarts AND crashed/hung threads
+        # IMPORTANT: We can't rely on self._monitor_thread because each Celery worker
+        # creates a new Plugin instance with _monitor_thread=None. Instead, we check
+        # the monitoring_heartbeat timestamp to see if a thread is actively polling.
         thread_dead = not self._monitor_thread or not self._monitor_thread.is_alive()
-        if monitoring_active and thread_dead:
+
+        # Check if another thread is actually running by looking at heartbeat
+        heartbeat_str = settings.get("monitoring_heartbeat")
+        heartbeat_recent = False
+        if heartbeat_str:
+            try:
+                heartbeat = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
+                if isinstance(heartbeat.tzinfo, type(None)):
+                    heartbeat = heartbeat.replace(tzinfo=dt_timezone.utc)
+                age_seconds = (datetime.now(dt_timezone.utc) - heartbeat).total_seconds()
+                # Heartbeat threshold must be longer than poll_interval + poll_duration
+                # Poll cycles can take 5-10 minutes with many channels, so use poll_interval + 10 min buffer
+                poll_interval_minutes = settings.get("poll_interval_minutes", 15)
+                heartbeat_threshold = (poll_interval_minutes + 10) * 60  # e.g., 25 minutes for 15-min poll
+                heartbeat_recent = age_seconds < heartbeat_threshold
+                if heartbeat_recent:
+                    self._log(f"Monitoring heartbeat is recent ({int(age_seconds)}s ago, threshold={heartbeat_threshold}s), skipping auto-restart")
+            except (ValueError, TypeError):
+                pass
+
+        if monitoring_active and thread_dead and not heartbeat_recent:
             channels = settings.get("monitored_channels", "").strip()
             if channels and self._ytdlp_path:
                 self._log("Auto-restarting monitoring after service restart")
@@ -2230,6 +2253,10 @@ class Plugin:
                         self._monitoring_active = False
                         break
 
+                    # Update heartbeat to signal this thread is actively running
+                    # This prevents other Celery workers from starting duplicate threads
+                    self._persist_settings({"monitoring_heartbeat": timezone.now().isoformat()})
+
                     # Poll channels
                     try:
                         added, ended = self._poll_monitored_channels(settings)
@@ -2272,7 +2299,8 @@ class Plugin:
             self._log("Monitoring loop exiting, cleaning up flags")
             self._monitoring_active = False
             try:
-                self._persist_settings({"monitoring_active": False})
+                # Clear both monitoring_active and heartbeat so auto-restart can work on next startup
+                self._persist_settings({"monitoring_active": False, "monitoring_heartbeat": None})
             except Exception as cleanup_exc:
                 self._log_error(f"Failed to persist monitoring_active=False: {cleanup_exc}")
 
