@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.4"
+    version = "1.16.5"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -593,10 +593,31 @@ class Plugin:
         except PluginConfig.DoesNotExist:
             settings = context.get("settings", {})
 
-        # Check if already active (use both DB flag AND thread state)
+        # Check if already active (use both DB flag AND heartbeat from any worker)
+        # Each Celery worker has its own Plugin instance, so we can't rely on self._monitor_thread
+        # Instead, check the heartbeat to see if ANY thread is actively running
         thread_alive = self._monitor_thread and self._monitor_thread.is_alive()
-        if settings.get("monitoring_active") and thread_alive:
-            return {"status": "running", "message": "Monitoring already active"}
+
+        if settings.get("monitoring_active"):
+            # Check heartbeat to see if another worker's thread is running
+            heartbeat_str = settings.get("monitoring_heartbeat")
+            if heartbeat_str:
+                try:
+                    heartbeat = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
+                    if isinstance(heartbeat.tzinfo, type(None)):
+                        heartbeat = heartbeat.replace(tzinfo=dt_timezone.utc)
+                    age_seconds = (datetime.now(dt_timezone.utc) - heartbeat).total_seconds()
+                    poll_interval_minutes = settings.get("poll_interval_minutes", 15)
+                    heartbeat_threshold = (poll_interval_minutes + 10) * 60
+                    if age_seconds < heartbeat_threshold:
+                        self._log(f"Monitoring already active (heartbeat {int(age_seconds)}s ago)")
+                        return {"status": "running", "message": "Monitoring already active"}
+                except (ValueError, TypeError):
+                    pass
+
+            # Also check local thread
+            if thread_alive:
+                return {"status": "running", "message": "Monitoring already active"}
 
         monitored = settings.get("monitored_channels", "").strip()
         if not monitored:
@@ -640,8 +661,10 @@ class Plugin:
             return {"status": "stopped", "message": "Monitoring not active"}
 
         # Step 1: Set DB flag FIRST - this is what threads in other workers will see
+        # Also clear heartbeat so Start Monitoring doesn't think a thread is still running
         updates = {
             "monitoring_active": False,
+            "monitoring_heartbeat": None,
         }
         self._persist_settings(updates)
 
