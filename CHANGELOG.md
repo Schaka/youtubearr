@@ -1,5 +1,11 @@
 # YouTubearr Changelog
 
+## [1.16.7] - 2026-04-02
+
+### Fixed
+
+- **Spurious notifications for streams whose tracking was cleared**: If a stream's `tracked_streams` entry was fully removed (by cleanup after 2 missed polls, or a Reset All race), the stream would be treated as brand-new on the next poll — creating a duplicate channel and sending a notification. The poll now checks the DB for an existing channel matching the video ID before treating any untracked stream as new. If found, tracking is silently restored with no notification.
+
 ## [1.16.6] - 2026-04-02
 
 ### Fixed

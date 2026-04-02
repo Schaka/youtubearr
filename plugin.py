@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.6"
+    version = "1.16.7"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -1741,6 +1741,47 @@ class Plugin:
                             is_readd = True  # Don't send notification for re-adds
 
                     self._log(f"Processing stream {video_id}: in_tracked={is_tracked}, is_readd={is_readd}")
+
+                    # Before treating an untracked stream as new, check if a channel already
+                    # exists in the group for this video. tracked_streams can be cleared by Reset All
+                    # or cleanup while the channel still exists — we should restore tracking rather
+                    # than create a duplicate and send a spurious notification.
+                    if video_id and not is_tracked:
+                        try:
+                            group_name = settings.get("channel_group_name", self._channel_group_name)
+                            channel_group = ChannelGroup.objects.get(name=group_name)
+                            existing_channel = None
+                            for ch in Channel.objects.filter(channel_group=channel_group):
+                                for stream_obj in ch.streams.all():
+                                    if (stream_obj.url and video_id in stream_obj.url) or \
+                                       (stream_obj.name and video_id in stream_obj.name):
+                                        existing_channel = ch
+                                        break
+                                if existing_channel:
+                                    break
+
+                            if existing_channel:
+                                self._log(f"Found existing channel for untracked stream {video_id}, restoring tracking (no notification)")
+                                stream_obj = existing_channel.streams.first()
+                                tracked_streams[video_id] = {
+                                    "video_id": video_id,
+                                    "channel_id": existing_channel.id,
+                                    "stream_id": stream_obj.id if stream_obj else None,
+                                    "monitored_channel_id": channel_id,
+                                    "youtube_channel_id": "",
+                                    "youtube_channel_name": "",
+                                    "title": stream_obj.name if stream_obj else "",
+                                    "added_at": timezone.now().isoformat(),
+                                    "last_url_refresh": timezone.now().isoformat(),
+                                    "stream_url": stream_obj.url if stream_obj else "",
+                                    "is_live": True,
+                                    "channel_number": existing_channel.channel_number,
+                                }
+                                self._persist_settings({"tracked_streams": tracked_streams})
+                                continue  # Tracking restored, skip re-add and notification
+                        except ChannelGroup.DoesNotExist:
+                            pass
+
                     if video_id and not is_tracked:
                         # New livestream detected
                         self._log(f"New stream detected: {video_id}, extracting metadata...")
