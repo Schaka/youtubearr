@@ -1,5 +1,13 @@
 # YouTubearr Changelog
 
+## [1.16.6] - 2026-04-02
+
+### Fixed
+
+- **Stream re-adds causing duplicate channels and spurious notifications**: A transient yt-dlp miss (network blip, rate limit, brief offline) would immediately mark a stream as ended, delete its channel, and re-add it next poll with a new channel number. Streams now require **2 consecutive missed polls** before being marked as ended, so a single bad poll result is ignored.
+
+- **Wrong channel numbers after Reset All**: Sub-channel number assignment previously checked `tracked_streams` for existing numbers, which could be stale (overwritten by an in-flight poll racing with Reset All). Number assignment now relies only on the actual Dispatcharr DB channels and in-cycle assignments — both of which are always current.
+
 ## [1.16.2] - 2026-03-28
 
 ### Fixed

@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.5"
+    version = "1.16.6"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -1332,21 +1332,13 @@ class Plugin:
     def _get_next_subchannel_number(self, base_number: int, settings: Dict[str, Any]) -> float:
         """Get the next available sub-channel number for a base (e.g., 90.1, 90.2, etc.)"""
         # Get all channels in this base range [base, base+1)
+        # NOTE: We intentionally do NOT check tracked_streams here. tracked_streams can be stale
+        # (e.g., written back by an in-flight poll after Reset All). The DB and _assigned_channel_numbers
+        # are authoritative: DB has all committed channels, _assigned_channel_numbers has channels
+        # created earlier in this same poll cycle that aren't in DB yet.
         existing_subchannels = []
 
-        # Check tracked_streams
-        tracked_streams = settings.get("tracked_streams", {})
-        for stream_data in tracked_streams.values():
-            ch_num = stream_data.get("channel_number")
-            if ch_num is not None:
-                try:
-                    ch_float = float(ch_num)
-                    if base_number <= ch_float < base_number + 1:
-                        existing_subchannels.append(ch_float)
-                except (TypeError, ValueError):
-                    pass
-
-        # Also check actual Dispatcharr channels
+        # Check actual Dispatcharr channels in DB
         group_name = settings.get("channel_group_name", self._channel_group_name)
         try:
             group = ChannelGroup.objects.get(name=group_name)
@@ -1818,9 +1810,19 @@ class Plugin:
                 for video_id, stream_data in list(tracked_streams.items()):
                     if stream_data.get("monitored_channel_id") == channel_id:
                         if video_id not in current_video_ids and stream_data.get("is_live"):
-                            stream_data["is_live"] = False
-                            ended_count += 1
-                            self._log(f"Stream ended: {stream_data.get('title')}")
+                            # Require 2 consecutive missed polls before marking ended.
+                            # A single miss is often a transient yt-dlp blip, not a real end.
+                            missed = stream_data.get("missed_polls", 0) + 1
+                            stream_data["missed_polls"] = missed
+                            if missed >= 2:
+                                stream_data["is_live"] = False
+                                ended_count += 1
+                                self._log(f"Stream ended (missed {missed} polls): {stream_data.get('title')}")
+                            else:
+                                self._log(f"Stream not in poll results (miss #{missed}/2), keeping alive: {stream_data.get('title')}")
+                        elif video_id in current_video_ids and stream_data.get("missed_polls"):
+                            # Stream came back — reset the counter
+                            stream_data["missed_polls"] = 0
 
             except Exception as exc:
                 self._log_error(f"Failed to poll channel {channel_id}: {exc}")
