@@ -9,9 +9,13 @@ YouTubearr is a Dispatcharr plugin that monitors YouTube channels for livestream
 - **Zero API Quota**: Uses yt-dlp instead of YouTube Data API - no API key needed
 - **Auto-cleanup**: Automatically remove channels when streams end
 - **URL Refresh**: Handles YouTube's expiring stream URLs automatically
+- **EPG Integration**: Automatic programme guide data with livestream titles
 - **Sub-Channel Grouping**: Group related streams with decimal channels (90.1, 90.2, etc.)
 - **Title Filtering**: Regex filters for channels with many simultaneous streams
 - **Quality Selection**: Choose preferred stream quality (Best, 1080p, 720p, 480p)
+- **Channel Profiles**: Automatically add new channels to a Dispatcharr channel profile
+- **Notifications**: Telegram webhook notifications when new streams are added
+- **Jellyfin Integration**: Webhook trigger to refresh Jellyfin guide data automatically
 - **Zero Dependencies**: Bundled yt-dlp binary, no pip installs required
 
 ## Installation
@@ -68,6 +72,11 @@ That's it. No pip install, no apt-get, no API keys. The bundled yt-dlp binary ha
   - Used as fallback when stream extraction fails
   - Helps with age-restricted or region-locked content
   - Export from browser using a cookies extension (e.g., "Get cookies.txt LOCALLY")
+- **Channel Profile**: Optional Dispatcharr channel profile to automatically add new channels to
+- **EPG Source Name**: Name of the EPG source for guide data (default: "YouTube Live")
+- **Webhook URL**: URL to POST when channels are added or removed (e.g., Jellyfin refresh endpoint)
+- **Webhook Delay**: Seconds to wait before triggering the webhook (default: 5)
+- **Telegram Webhook URL**: URL to POST for Telegram notifications when new streams go live
 - **Manual URL**: Paste a YouTube livestream URL for quick manual addition
 - **Dispatcharr Base URL**: Base URL for stream links in notifications (e.g., https://tv.example.com)
 
@@ -75,15 +84,19 @@ That's it. No pip install, no apt-get, no API keys. The bundled yt-dlp binary ha
 
 YouTubearr automatically creates EPG (Electronic Program Guide) data for each YouTube channel. The plugin stores programme entries directly in Dispatcharr's database with the livestream title.
 
-### Step 1: Create a Dummy EPG Source in Dispatcharr
+### Step 1: EPG Source Setup
+
+YouTubearr automatically creates the EPG source on first use — no manual setup required. By default it creates a source named **YouTube Live**.
+
+If you want to use a different name, create the source manually first:
 
 1. Go to **Settings → EPG** in Dispatcharr
 2. Click **Add Source**
 3. Select **Custom Dummy EPG** as the source type
-4. Set the name to **YouTube Live** (must match the EPG Source Name in YouTubearr settings)
+4. Set the name to match the **EPG Source Name** setting in YouTubearr (default: "YouTube Live")
 5. Click **Save**
 
-That's it! YouTubearr handles programme data automatically - no Title Pattern or regex configuration needed.
+Then set the same name in YouTubearr's **EPG Source Name** setting.
 
 **Note:** The Dummy EPG source acts as a container for YouTubearr's programme data. The plugin creates `ProgramData` entries directly with the livestream title, bypassing the Dummy EPG's pattern-based generation.
 
@@ -131,7 +144,7 @@ curl "http://jellyfin:8096/ScheduledTasks?api_key=YOUR_API_KEY" | grep -A2 "Refr
 1. Add YouTube handles to **Monitored YouTube Channels** (see format above)
 2. Set your preferred **Poll Interval** (how often to check for streams)
 3. Click **Start Monitoring**
-5. YouTubearr will automatically:
+4. YouTubearr will automatically:
    - Check for new livestreams on monitored channels
    - Add new livestreams as Dispatcharr channels
    - Remove channels when streams end (if auto-cleanup is enabled)
@@ -144,6 +157,7 @@ curl "http://jellyfin:8096/ScheduledTasks?api_key=YOUR_API_KEY" | grep -A2 "Refr
 - **Stop Monitoring**: Stop automatic monitoring
 - **Refresh Now**: Immediately check for new/ended livestreams (bypasses poll interval)
 - **Cleanup**: Manually remove all channels for ended streams
+- **Reset All**: Remove all YouTubearr channels and clear all plugin state
 
 ## Channel Numbering
 
