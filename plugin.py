@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.7"
+    version = "1.16.8"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -698,6 +698,18 @@ class Plugin:
             settings = dict(cfg.settings or {})
         except PluginConfig.DoesNotExist:
             settings = context.get("settings", {})
+
+        # If monitoring is active, the background thread is already polling on its schedule.
+        # Running a second concurrent poll blocks the HTTP thread for minutes and causes
+        # 504 Gateway Timeouts — especially with many tracked streams.
+        if settings.get("monitoring_active"):
+            poll_interval = settings.get("poll_interval_minutes", 15)
+            last_poll = settings.get("last_poll_time", "")
+            last_poll_display = last_poll[:19].replace("T", " ") if last_poll else "unknown"
+            return {
+                "status": "success",
+                "message": f"Monitoring is active (polling every {poll_interval} min). Last poll: {last_poll_display}. No manual refresh needed.",
+            }
 
         try:
             # Run one poll cycle

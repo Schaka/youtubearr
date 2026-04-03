@@ -1,5 +1,11 @@
 # YouTubearr Changelog
 
+## [1.16.8] - 2026-04-02
+
+### Fixed
+
+- **504 Gateway Timeout on manual Refresh (Issue #8)**: When monitoring is active, the Refresh button now returns immediately with the last poll time instead of running a concurrent blocking poll. Running a second poll alongside the background thread tied up the HTTP thread for minutes (proportional to the number of monitored channels) and caused 504 timeouts. Manual refresh is only useful when monitoring is not running.
+
 ## [1.16.7] - 2026-04-02
 
 ### Fixed
