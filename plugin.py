@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.8"
+    version = "1.16.9"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -286,6 +286,9 @@ class Plugin:
 
         # Track assigned channel numbers during poll cycle to avoid duplicates
         self._assigned_channel_numbers: set = set()
+
+        # Track video IDs that recently failed metadata extraction to avoid retrying every poll
+        self._extraction_failures: Dict[str, float] = {}  # video_id -> unix timestamp of failure
 
         # Field defaults
         self._field_defaults = {field["id"]: field.get("default") for field in self.fields}
@@ -626,6 +629,7 @@ class Plugin:
         # Set in-memory flag BEFORE starting thread (prevents race with Dispatcharr form saves)
         self._monitoring_active = True
         self._monitor_stop_event.clear()
+        self._extraction_failures.clear()  # Fresh start: retry any previously-failed extractions
 
         # Update settings in DB
         updates = {
@@ -1378,16 +1382,25 @@ class Plugin:
         existing_subchannels = list(set(existing_subchannels))
 
         if not existing_subchannels:
-            # First stream for this base - use .1
             return float(f"{base_number}.1")
 
-        # Find the next available sub-channel
-        max_sub = max(existing_subchannels)
-        # Extract the decimal part and increment
-        decimal_part = int(round((max_sub - base_number) * 10))
-        next_decimal = decimal_part + 1
+        # Extract occupied decimal parts as integers using string representation.
+        # This avoids float arithmetic issues (e.g., float("92.10") == float("92.1")),
+        # and fills gaps (if 92.1-92.4 are free but 92.5-92.8 are taken, start at 92.1).
+        occupied = set()
+        for ch_num in existing_subchannels:
+            ch_str = str(float(ch_num))
+            if '.' in ch_str:
+                try:
+                    occupied.add(int(ch_str.split('.')[1]))
+                except ValueError:
+                    pass
 
-        # Handle .9 -> .10, .11, etc.
+        # Find the first available decimal slot starting from 1
+        next_decimal = 1
+        while next_decimal in occupied:
+            next_decimal += 1
+
         return float(f"{base_number}.{next_decimal}")
 
     def _get_next_unmapped_base_number(self, settings: Dict[str, Any]) -> int:
@@ -1795,6 +1808,14 @@ class Plugin:
                             pass
 
                     if video_id and not is_tracked:
+                        # Skip streams that recently failed metadata extraction.
+                        # Prevents re-attempting every poll for inaccessible streams (e.g., members-only).
+                        # Cleared when monitoring starts so new cookies take effect immediately.
+                        failure_time = self._extraction_failures.get(video_id, 0)
+                        if time.time() - failure_time < 86400:  # 24-hour retry window
+                            self._log(f"Skipping {video_id}: metadata extraction failed recently (retries in {int(86400 - (time.time() - failure_time)) // 3600}h)")
+                            continue
+
                         # New livestream detected
                         self._log(f"New stream detected: {video_id}, extracting metadata...")
                         quality = settings.get("stream_quality", "best")
@@ -1803,6 +1824,7 @@ class Plugin:
 
                         if not metadata:
                             self._log_error(f"Failed to extract metadata for {video_id} - yt-dlp returned None")
+                            self._extraction_failures[video_id] = time.time()
                             continue
 
                         self._log(f"Metadata extracted for {video_id}: is_live={metadata.get('is_live')}, title={metadata.get('title')}")

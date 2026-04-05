@@ -1,5 +1,13 @@
 # YouTubearr Changelog
 
+## [1.16.9] - 2026-04-05
+
+### Fixed
+
+- **Duplicate sub-channel numbers when base has gaps (e.g., four NASA channels all at 92.1)**: Sub-channel assignment used a "max + 1" strategy, which has two failure modes. First, when two channels share the same base number (e.g., `@nasa=92` and `@NASASpaceFlight=92`), NASASpaceFlight occupied 92.5–92.8, so new NASA streams were assigned 92.9, then 92.10 — but `float("92.10") == float("92.1")`, causing a collision. Every subsequent stream also got 92.1. Second, the old logic never reused lower available slots (92.1–92.4 sat empty while streams were assigned 92.9+). Fixed by switching to a **first-available slot** strategy: extract occupied decimal parts from string representations (avoiding float precision issues) and find the lowest unused slot starting from 1. New streams now fill gaps before extending the range, and the `.10 == .1` collision is eliminated.
+
+- **Inaccessible streams (e.g., members-only) re-attempted every poll**: Streams that fail metadata extraction (permission errors, private videos, etc.) were never added to `tracked_streams`, so they were re-detected as "new" on every poll cycle — wasting two yt-dlp calls per stream per poll. These video IDs are now remembered in a 24-hour in-memory failure cache. The cache is cleared when monitoring starts, so adding cookies immediately unblocks previously-failed streams.
+
 ## [1.16.8] - 2026-04-02
 
 ### Fixed
