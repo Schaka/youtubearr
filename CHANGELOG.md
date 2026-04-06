@@ -1,5 +1,19 @@
 # YouTubearr Changelog
 
+## [1.17.0] - 2026-04-06
+
+### Fixed
+
+- **Channel name suffix (#N) starts too high in sequential mode (Issue #14)**: In sequential numbering mode, `#N` was computed by counting all `tracked_streams` entries for the YouTube channel — including ended streams whose Dispatcharr channels had already been deleted. A channel that previously ran 2 streams would name its next streams `#3`/`#4` instead of `#1`/`#2`. Fixed by counting only active streams (those whose `channel_id` still exists in the DB).
+
+### Added
+
+- **Dynamic EPG source name placeholders (Issue #13)**: The EPG Source Name setting now supports `{title}` and `{channel}` placeholders substituted with the video title and YouTube channel name at channel creation time. Example: `{channel} Live` creates a separate EPG source per YouTube channel (e.g., `NASA Live`). Static names (no placeholders) behave identically to v1.16.9. When placeholders are used, the XMLTV cache generator automatically discovers all associated EPG sources from the channel group and writes a separate cache file for each.
+
+### Meta
+
+- Added `license` field to `plugin.json` in preparation for Dispatcharr Plugin Repository submission.
+
 ## [1.16.9] - 2026-04-05
 
 ### Fixed

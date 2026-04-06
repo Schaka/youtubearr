@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.16.9"
+    version = "1.17.0"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -190,7 +190,7 @@ class Plugin:
             "label": "EPG Source Name",
             "type": "string",
             "default": "YouTube Live",
-            "help_text": "Name for the Dummy EPG source. Will be auto-created if it doesn't exist. Leave empty to skip EPG assignment.",
+            "help_text": "Name for the Dummy EPG source. Will be auto-created if it doesn't exist. Leave empty to skip EPG assignment. Supports {title} (video title) and {channel} (YouTube channel name) placeholders — e.g. '{channel} Live' creates a separate EPG source per YouTube channel. Note: {title} creates one source per individual stream.",
         },
         {
             "id": "info_advanced",
@@ -1136,10 +1136,22 @@ class Plugin:
             else:
                 stream_number = 1
         else:
-            # Sequential mode: count existing streams from this YouTube channel + 1
+            # Sequential mode: count ACTIVE streams from this YouTube channel + 1.
+            # Only count tracked_streams entries whose channel_id still exists in the DB.
+            # Counting all entries (including ended streams) caused #N to start too high
+            # when a channel that previously ran N streams goes live again. Since
+            # _create_stream_and_channel is @transaction.atomic, the DB is authoritative
+            # for channels created earlier in the same poll cycle too.
+            group_name = settings.get("channel_group_name", self._channel_group_name)
+            active_channel_ids = set(Channel.objects.filter(
+                channel_group__name=group_name
+            ).values_list('id', flat=True))
             tracked_streams = settings.get("tracked_streams", {})
-            stream_count = sum(1 for s in tracked_streams.values()
-                             if s.get("youtube_channel_name", "").lower() == youtube_channel_name.lower())
+            stream_count = sum(
+                1 for s in tracked_streams.values()
+                if s.get("youtube_channel_name", "").lower() == youtube_channel_name.lower()
+                and s.get("channel_id") in active_channel_ids
+            )
             stream_number = stream_count + 1
         channel_name = f"{youtube_channel_name} #{stream_number}"
 
@@ -1174,6 +1186,7 @@ class Plugin:
 
         # Auto-create and assign EPG if configured
         epg_source_name = settings.get("epg_source_name", "YouTube Live").strip()
+        epg_source_name = epg_source_name.replace("{title}", video_title).replace("{channel}", youtube_channel_name)
         if epg_source_name:
             try:
                 # Get or create the Dummy EPG source
@@ -2429,57 +2442,73 @@ class Plugin:
         Jellyfin reads EPG from XMLTV files at /app/media/cached_epg/{source_id}.tmp
         This generates that file from the EPGData/ProgramData in the database.
         """
-        epg_source_name = settings.get("epg_source_name", "YouTube Live").strip()
-        if not epg_source_name:
+        epg_source_name_template = settings.get("epg_source_name", "YouTube Live").strip()
+        if not epg_source_name_template:
             return
 
+        # If the template contains placeholders, discover all EPG sources associated with
+        # channels in our group rather than looking up a single static name. Each resolved
+        # placeholder (e.g. "{channel} Live" → "NASA Live", "SpaceX Live") creates a separate
+        # EPGSource, and each gets its own XMLTV cache file.
+        if "{title}" in epg_source_name_template or "{channel}" in epg_source_name_template:
+            group_name = settings.get("channel_group_name", self._channel_group_name)
+            try:
+                group = ChannelGroup.objects.get(name=group_name)
+                epg_sources = list(EPGSource.objects.filter(
+                    epgdata__channel__channel_group=group
+                ).distinct())
+            except ChannelGroup.DoesNotExist:
+                return
+            if not epg_sources:
+                return
+        else:
+            try:
+                epg_sources = [EPGSource.objects.get(name=epg_source_name_template)]
+            except EPGSource.DoesNotExist:
+                self._log(f"EPG source '{epg_source_name_template}' not found, skipping cache generation")
+                return
+
+        def escape_xml(s: str) -> str:
+            if not s:
+                return ""
+            return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
         try:
-            epg_source = EPGSource.objects.get(name=epg_source_name)
-        except EPGSource.DoesNotExist:
-            self._log(f"EPG source '{epg_source_name}' not found, skipping cache generation")
-            return
+            for epg_source in epg_sources:
+                cache_path = f"/app/media/cached_epg/{epg_source.id}.tmp"
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
-        cache_path = f"/app/media/cached_epg/{epg_source.id}.tmp"
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                    f.write('<tv generator-info-name="YouTubearr Plugin">\n')
 
-        try:
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    # Write channels
+                    for epg in EPGData.objects.filter(epg_source=epg_source):
+                        name = escape_xml(epg.name)
+                        f.write(f'  <channel id="{epg.tvg_id}">\n')
+                        f.write(f'    <display-name>{name}</display-name>\n')
+                        if epg.icon_url:
+                            f.write(f'    <icon src="{escape_xml(epg.icon_url)}"/>\n')
+                        f.write('  </channel>\n')
 
-            def escape_xml(s: str) -> str:
-                if not s:
-                    return ""
-                return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                    # Write programs
+                    count = 0
+                    for prog in ProgramData.objects.filter(epg__epg_source=epg_source).select_related("epg"):
+                        start = prog.start_time.strftime("%Y%m%d%H%M%S +0000")
+                        stop = prog.end_time.strftime("%Y%m%d%H%M%S +0000")
+                        title = escape_xml(prog.title or "")
+                        desc = escape_xml((prog.description or "")[:500])
 
-            with open(cache_path, "w", encoding="utf-8") as f:
-                f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-                f.write('<tv generator-info-name="YouTubearr Plugin">\n')
+                        f.write(f'  <programme start="{start}" stop="{stop}" channel="{prog.epg.tvg_id}">\n')
+                        f.write(f'    <title>{title}</title>\n')
+                        if desc:
+                            f.write(f'    <desc>{desc}</desc>\n')
+                        f.write('  </programme>\n')
+                        count += 1
 
-                # Write channels
-                for epg in EPGData.objects.filter(epg_source=epg_source):
-                    name = escape_xml(epg.name)
-                    f.write(f'  <channel id="{epg.tvg_id}">\n')
-                    f.write(f'    <display-name>{name}</display-name>\n')
-                    if epg.icon_url:
-                        f.write(f'    <icon src="{escape_xml(epg.icon_url)}"/>\n')
-                    f.write('  </channel>\n')
+                    f.write('</tv>\n')
 
-                # Write programs
-                count = 0
-                for prog in ProgramData.objects.filter(epg__epg_source=epg_source).select_related("epg"):
-                    start = prog.start_time.strftime("%Y%m%d%H%M%S +0000")
-                    stop = prog.end_time.strftime("%Y%m%d%H%M%S +0000")
-                    title = escape_xml(prog.title or "")
-                    desc = escape_xml((prog.description or "")[:500])
-
-                    f.write(f'  <programme start="{start}" stop="{stop}" channel="{prog.epg.tvg_id}">\n')
-                    f.write(f'    <title>{title}</title>\n')
-                    if desc:
-                        f.write(f'    <desc>{desc}</desc>\n')
-                    f.write('  </programme>\n')
-                    count += 1
-
-                f.write('</tv>\n')
-
-            self._log(f"XMLTV cache generated: {count} programs at {cache_path}")
+                self._log(f"XMLTV cache generated: {count} programs at {cache_path}")
 
         except Exception as e:
             self._log_error(f"Failed to generate XMLTV cache: {e}")
