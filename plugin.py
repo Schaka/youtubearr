@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.17.0"
+    version = "1.17.2"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -979,6 +979,8 @@ class Plugin:
             if result.returncode != 0:
                 self._log_error(f"yt-dlp failed for {video_id}{retry_label} (returncode={result.returncode})")
                 self._log_error(f"yt-dlp stderr: {result.stderr[:500]}")  # First 500 chars
+                if "members" in result.stderr.lower() and "only" in result.stderr.lower():
+                    return {"_members_only": True}
                 return None
 
             # Parse JSON output
@@ -1840,6 +1842,12 @@ class Plugin:
                             self._extraction_failures[video_id] = time.time()
                             continue
 
+                        if metadata.get("_members_only"):
+                            self._log(f"Skipping {video_id}: members-only content (retry in 7 days)")
+                            # Store time 6 days in the future so the 24h check won't clear it for 7 days total
+                            self._extraction_failures[video_id] = time.time() + 86400 * 6
+                            continue
+
                         self._log(f"Metadata extracted for {video_id}: is_live={metadata.get('is_live')}, title={metadata.get('title')}")
 
                         if metadata.get("is_live"):
@@ -1898,16 +1906,18 @@ class Plugin:
                 for video_id, stream_data in list(tracked_streams.items()):
                     if stream_data.get("monitored_channel_id") == channel_id:
                         if video_id not in current_video_ids and stream_data.get("is_live"):
-                            # Require 2 consecutive missed polls before marking ended.
-                            # A single miss is often a transient yt-dlp blip, not a real end.
+                            # Require 3 consecutive missed polls before marking ended.
+                            # YouTube rate-limiting can cause yt-dlp to return 0 streams for
+                            # 2 consecutive polls even for live channels, which was triggering
+                            # false deletions and duplicate re-add notifications.
                             missed = stream_data.get("missed_polls", 0) + 1
                             stream_data["missed_polls"] = missed
-                            if missed >= 2:
+                            if missed >= 3:
                                 stream_data["is_live"] = False
                                 ended_count += 1
                                 self._log(f"Stream ended (missed {missed} polls): {stream_data.get('title')}")
                             else:
-                                self._log(f"Stream not in poll results (miss #{missed}/2), keeping alive: {stream_data.get('title')}")
+                                self._log(f"Stream not in poll results (miss #{missed}/3), keeping alive: {stream_data.get('title')}")
                         elif video_id in current_video_ids and stream_data.get("missed_polls"):
                             # Stream came back — reset the counter
                             stream_data["missed_polls"] = 0
@@ -2586,7 +2596,7 @@ class Plugin:
                 if status in [200, 201, 204]:
                     self._log(f"Telegram notification sent successfully (HTTP {status})")
                 else:
-                    self._log(f"Telegram notification returned HTTP {status}")
+                    self._log_error(f"Telegram notification failed: HTTP {status} from {telegram_url}")
         except Exception as exc:
             self._log_error(f"Failed to send Telegram notification: {exc}")
 

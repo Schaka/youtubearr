@@ -1,5 +1,15 @@
 # YouTubearr Changelog
 
+## [1.17.2] - 2026-04-27
+
+### Fixed
+
+- **Duplicate notifications from transient yt-dlp false-zero results**: YouTube rate-limiting was causing yt-dlp flat-playlist to return 0 live streams for a channel for 2 consecutive poll cycles even while those streams were still live. The previous 2-miss threshold was being hit by these transient failures, causing channels to be deleted and re-added with fresh notifications. Threshold increased from 2 to 3 consecutive missed polls (~48 min with default interval) before marking a stream as ended.
+
+- **Members-only streams causing repeated retry loop (from v1.17.1)**: When yt-dlp returns a members-only error, the metadata extractor now returns a sentinel value so the poller can skip that video for 7 days instead of re-attempting it every poll cycle.
+
+- **Telegram non-200 responses logged at wrong level (from v1.17.1)**: Non-200 HTTP responses from the Telegram webhook were logged with `_log` (info), masking delivery failures. Changed to `_log_error`.
+
 ## [1.17.0] - 2026-04-06
 
 ### Fixed
