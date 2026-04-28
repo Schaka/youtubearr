@@ -9,7 +9,7 @@ This project bundles the following executables:
 
 ## QuickJS-NG
 - Project: QuickJS-NG (qjs)
-- Version: 0.12.1
+- Version: 0.14.0
 - License: MIT License
 - Upstream: https://github.com/nicknash/quickjs-ng
 
