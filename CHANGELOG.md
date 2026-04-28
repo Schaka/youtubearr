@@ -1,5 +1,11 @@
 # YouTubearr Changelog
 
+## [1.17.3] - 2026-04-27
+
+### Fixed
+
+- **504 Gateway Timeout on manual Refresh when monitoring is inactive (Issue #18)**: The v1.16.8 fix only guarded against 504s when monitoring was active. When monitoring is off, Refresh Now would run the full poll synchronously on the HTTP thread — with many channels this exceeds nginx's timeout, causing a 504 even though channels are still created in the background. Manual refresh now runs in a background thread and returns immediately, matching the behavior of the monitoring loop. A concurrent-refresh guard prevents double-polling if the button is clicked twice.
+
 ## [1.17.2] - 2026-04-27
 
 ### Fixed

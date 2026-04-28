@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.17.2"
+    version = "1.17.3"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -280,6 +280,7 @@ class Plugin:
         self._monitor_thread: Optional[threading.Thread] = None
         self._monitor_stop_event = threading.Event()
         self._monitoring_active = False  # In-memory flag to prevent race with Dispatcharr form saves
+        self._manual_refresh_lock = threading.Lock()
 
         # Stream profile cache
         self._stream_profile_id: Optional[int] = None
@@ -715,41 +716,25 @@ class Plugin:
                 "message": f"Monitoring is active (polling every {poll_interval} min). Last poll: {last_poll_display}. No manual refresh needed.",
             }
 
-        try:
-            # Run one poll cycle
-            added, ended = self._poll_monitored_channels(settings)
+        if not self._manual_refresh_lock.acquire(blocking=False):
+            return {"status": "info", "message": "A manual refresh is already in progress — check logs for progress."}
 
-            # NOTE: URL refresh skipped on manual Refresh to avoid 504 timeouts (#8)
-            # URL refresh happens automatically in the monitoring loop
-            refreshed = 0
+        def _run():
+            try:
+                cfg = PluginConfig.objects.get(key=self._plugin_key)
+                s = dict(cfg.settings or {})
+                added, ended = self._poll_monitored_channels(s)
+                if s.get("auto_cleanup", True):
+                    self._cleanup_ended_streams(s)
+                if added > 0 or ended > 0:
+                    self._trigger_webhook(s)
+            except Exception as exc:
+                self._log_error(f"Manual refresh failed: {exc}")
+            finally:
+                self._manual_refresh_lock.release()
 
-            # Cleanup if enabled
-            cleaned = 0
-            if settings.get("auto_cleanup", True):
-                cleaned = self._cleanup_ended_streams(settings)
-
-            message_parts = []
-            if added > 0:
-                message_parts.append(f"{added} stream(s) added")
-            if ended > 0:
-                message_parts.append(f"{ended} stream(s) ended")
-            if cleaned > 0:
-                message_parts.append(f"{cleaned} channel(s) cleaned up")
-
-            # Trigger webhook if channels changed
-            if added > 0 or cleaned > 0:
-                self._trigger_webhook(settings)
-
-            message = ", ".join(message_parts) if message_parts else "No changes detected"
-
-            return {
-                "status": "success",
-                "message": f"Refresh complete: {message}",
-            }
-
-        except Exception as exc:
-            self._log_error(f"Refresh failed: {exc}")
-            return {"status": "error", "message": f"Refresh failed: {str(exc)}"}
+        threading.Thread(target=_run, daemon=True, name="YouTubearr-ManualRefresh").start()
+        return {"status": "success", "message": "Refresh started in background — check logs or wait for the next status update."}
 
     def _handle_cleanup(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """Manually cleanup ended streams and orphaned tracked_streams entries"""
