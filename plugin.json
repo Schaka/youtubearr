@@ -4,5 +4,6 @@
   "description": "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering",
   "author": "Jeff Gooch",
   "license": "Unlicense",
-  "help_url": "https://github.com/jeff-gooch/Youtubearr"
+  "help_url": "https://github.com/jeff-gooch/Youtubearr",
+  "repo_url": "https://github.com/jeff-gooch/youtubearr"
 }
