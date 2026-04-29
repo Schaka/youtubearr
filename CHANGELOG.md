@@ -1,5 +1,13 @@
 # YouTubearr Changelog
 
+## [1.17.4] - 2026-04-27
+
+### Fixed
+
+- **Duplicate notifications from flat-playlist false-zero results (root fix)**: Replaced the missed-polls threshold approach with direct per-video verification. When a tracked stream is absent from the flat-playlist scan, yt-dlp now queries the specific video URL (`--print live_status`) to determine authoritatively whether the stream is still live before marking it ended. This eliminates false deletions caused by YouTube returning 0 results for active 24/7 streams under rate-limiting, no matter how many consecutive polls are affected.
+
+- **Members-only/inaccessible streams re-announced after container restart**: The extraction-failure cache (which prevents retrying unresolvable streams like members-only VirtualRailfan VODs) was in-memory only and wiped on every container restart, causing repeated channel-add notifications for streams that can never be accessed. The cache is now persisted to DB settings and restored at monitoring-loop startup. Entries that have passed their expiry window are not restored. Monitoring Stop/Start still clears the cache for a fresh retry.
+
 ## [1.17.3] - 2026-04-27
 
 ### Fixed

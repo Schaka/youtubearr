@@ -24,7 +24,7 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.17.3"
+    version = "1.17.4"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
     help_url = "https://github.com/jeff-gooch/Youtubearr"
@@ -636,6 +636,7 @@ class Plugin:
         updates = {
             "monitoring_active": True,
             "last_poll_time": timezone.now().isoformat(),
+            "extraction_failures": {},
         }
         self._persist_settings(updates)
 
@@ -1825,12 +1826,14 @@ class Plugin:
                         if not metadata:
                             self._log_error(f"Failed to extract metadata for {video_id} - yt-dlp returned None")
                             self._extraction_failures[video_id] = time.time()
+                            self._persist_extraction_failures()
                             continue
 
                         if metadata.get("_members_only"):
                             self._log(f"Skipping {video_id}: members-only content (retry in 7 days)")
                             # Store time 6 days in the future so the 24h check won't clear it for 7 days total
                             self._extraction_failures[video_id] = time.time() + 86400 * 6
+                            self._persist_extraction_failures()
                             continue
 
                         self._log(f"Metadata extracted for {video_id}: is_live={metadata.get('is_live')}, title={metadata.get('title')}")
@@ -1891,21 +1894,18 @@ class Plugin:
                 for video_id, stream_data in list(tracked_streams.items()):
                     if stream_data.get("monitored_channel_id") == channel_id:
                         if video_id not in current_video_ids and stream_data.get("is_live"):
-                            # Require 3 consecutive missed polls before marking ended.
-                            # YouTube rate-limiting can cause yt-dlp to return 0 streams for
-                            # 2 consecutive polls even for live channels, which was triggering
-                            # false deletions and duplicate re-add notifications.
-                            missed = stream_data.get("missed_polls", 0) + 1
-                            stream_data["missed_polls"] = missed
-                            if missed >= 3:
+                            # Flat-playlist missed this stream — verify directly before acting.
+                            # The /streams tab scan is unreliable (rate-limiting, CDN inconsistency)
+                            # and routinely returns 0 for channels with active streams. A direct
+                            # video-level check is authoritative and avoids false deletions.
+                            title = stream_data.get("title", video_id)
+                            self._log(f"Stream not in flat-playlist, verifying directly: {title}")
+                            if self._verify_video_is_live(video_id):
+                                self._log(f"Direct check: still live (flat-playlist false negative): {title}")
+                            else:
                                 stream_data["is_live"] = False
                                 ended_count += 1
-                                self._log(f"Stream ended (missed {missed} polls): {stream_data.get('title')}")
-                            else:
-                                self._log(f"Stream not in poll results (miss #{missed}/3), keeping alive: {stream_data.get('title')}")
-                        elif video_id in current_video_ids and stream_data.get("missed_polls"):
-                            # Stream came back — reset the counter
-                            stream_data["missed_polls"] = 0
+                                self._log(f"Direct check: confirmed ended: {title}")
 
             except Exception as exc:
                 self._log_error(f"Failed to poll channel {channel_id}: {exc}")
@@ -1917,6 +1917,36 @@ class Plugin:
         })
 
         return added_count, ended_count
+
+    def _verify_video_is_live(self, video_id: str) -> bool:
+        """Directly verify whether a specific video is currently live.
+
+        Used when a tracked stream disappears from the flat-playlist scan.
+        Much more reliable than the channel /streams tab for ongoing streams.
+        Fails safe — returns True (assume live) on any error or timeout.
+        """
+        try:
+            yt_dlp_path = self._find_ytdlp_binary()
+            if not yt_dlp_path:
+                return True
+            cmd = [
+                yt_dlp_path,
+                "--skip-download",
+                "--print", "live_status",
+                "--no-warnings",
+                "--quiet",
+                f"https://www.youtube.com/watch?v={video_id}",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            status = result.stdout.strip()
+            self._log(f"Direct live check for {video_id}: {status!r}")
+            return status == "is_live"
+        except subprocess.TimeoutExpired:
+            self._log_error(f"Direct live check timed out for {video_id}, assuming live")
+            return True
+        except Exception as exc:
+            self._log_error(f"Direct live check failed for {video_id}: {exc}, assuming live")
+            return True
 
     def _get_live_streams_via_ytdlp(self, channel_handle: str, settings: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
         """Get currently live streams for a YouTube channel using yt-dlp flat-playlist.
@@ -2340,6 +2370,21 @@ class Plugin:
         self._log("Monitoring loop started")
 
         try:
+            # Restore extraction failures that survived from before last container restart
+            try:
+                cfg = PluginConfig.objects.get(key=plugin_key)
+                persisted_failures = dict(cfg.settings or {}).get("extraction_failures", {})
+                now = time.time()
+                loaded = 0
+                for vid, fail_time in persisted_failures.items():
+                    if fail_time + 86400 > now and vid not in self._extraction_failures:
+                        self._extraction_failures[vid] = fail_time
+                        loaded += 1
+                if loaded:
+                    self._log(f"Restored {loaded} persisted extraction failures from DB")
+            except PluginConfig.DoesNotExist:
+                pass
+
             while not self._monitor_stop_event.is_set():
                 try:
                     # Check in-memory flag first (authoritative - DB flag can be overwritten by Dispatcharr)
@@ -2415,6 +2460,12 @@ class Plugin:
         self._log("Monitoring loop stopped")
 
     # --- State Management ---
+
+    def _persist_extraction_failures(self) -> None:
+        """Persist non-expired extraction failures to DB so they survive container restarts."""
+        now = time.time()
+        to_save = {vid: t for vid, t in self._extraction_failures.items() if t + 86400 > now}
+        self._persist_settings({"extraction_failures": to_save})
 
     def _persist_settings(self, updates: Dict[str, Any]) -> None:
         """Persist settings updates to database (thread-safe)"""
