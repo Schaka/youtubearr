@@ -1,5 +1,11 @@
 # YouTubearr Changelog
 
+## [1.17.6] - 2026-05-02
+
+### Fixed
+
+- **CodeQL `py/incomplete-url-substring-sanitization`**: Two `"youtube.com" in url` substring checks in `_extract_username_map` and `_parse_channel_ids` were replaced with `urllib.parse.urlparse(url).netloc.lower().endswith(...)` to anchor the domain check to the hostname field, preventing the substring from matching at an arbitrary position in the URL string.
+
 ## [1.17.5] - 2026-05-02
 
 ### Fixed
