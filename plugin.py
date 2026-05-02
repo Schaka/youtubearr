@@ -24,10 +24,10 @@ from core.scheduling import create_or_update_periodic_task, delete_periodic_task
 
 class Plugin:
     name = "YouTubearr"
-    version = "1.17.4"
+    version = "1.17.5"
     description = "Zero-dependency YouTube livestream plugin with automatic monitoring and configurable numbering"
     author = "Jeff Gooch"
-    help_url = "https://github.com/jeff-gooch/Youtubearr"
+    help_url = "https://github.com/jeff-gooch/youtubearr"
 
     fields = [
         {
@@ -1926,11 +1926,10 @@ class Plugin:
         Fails safe — returns True (assume live) on any error or timeout.
         """
         try:
-            yt_dlp_path = self._find_ytdlp_binary()
-            if not yt_dlp_path:
+            if not self._ytdlp_path:
                 return True
             cmd = [
-                yt_dlp_path,
+                self._ytdlp_path,
                 "--skip-download",
                 "--print", "live_status",
                 "--no-warnings",

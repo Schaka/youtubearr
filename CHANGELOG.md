@@ -1,5 +1,13 @@
 # YouTubearr Changelog
 
+## [1.17.5] - 2026-05-02
+
+### Fixed
+
+- **`help_url` in plugin.json had inconsistent casing** (`Youtubearr` vs `youtubearr`): Normalized to lowercase to match `repo_url` — required for Dispatcharr Plugin Repository submission.
+
+- **`_verify_video_is_live` called `_find_ytdlp_binary()` on every invocation**: This triggered a filesystem probe and a `yt-dlp --version` subprocess call each time a tracked stream disappeared from the flat-playlist scan, adding unnecessary overhead when streams were being verified. Changed to use the already-resolved `self._ytdlp_path`.
+
 ## [1.17.4] - 2026-04-27
 
 ### Fixed
