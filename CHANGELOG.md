@@ -1,5 +1,11 @@
 # YouTubearr Changelog
 
+## [1.17.7] - 2026-05-02
+
+### Fixed
+
+- **CodeQL `py/incomplete-url-substring-sanitization` (tightened)**: `endswith("youtube.com")` alone also matches `evil-youtube.com`. Changed to `== "youtube.com" or endswith(".youtube.com")` (and same for `youtu.be`) so domain matching is properly anchored and cannot be spoofed by a prefix.
+
 ## [1.17.6] - 2026-05-02
 
 ### Fixed
