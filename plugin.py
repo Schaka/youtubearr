@@ -1945,10 +1945,14 @@ class Plugin:
             return True
 
     def _get_live_streams_via_ytdlp(self, channel_handle: str, settings: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-        """Get currently live streams for a YouTube channel.
+        """Get all currently live streams for a YouTube channel.
 
-        Uses the @channel/live URL which resolves to the active live stream (if any).
-        --flat-playlist is NOT used because it returns live_status=null for all entries.
+        Uses the @channel/streams tab with full extraction (no --flat-playlist).
+        Flat-playlist mode returns live_status=null for all entries, making live
+        detection impossible. Full extraction correctly populates live_status.
+
+        Caps at --playlist-end 15 since live streams appear first in the streams
+        tab and no channel realistically runs more than 15 simultaneous broadcasts.
 
         Args:
             channel_handle: YouTube channel handle (e.g., "@nasa" or "nasa")
@@ -1961,8 +1965,8 @@ class Plugin:
         if not channel_handle.startswith("@"):
             channel_handle = f"@{channel_handle}"
 
-        live_url = f"https://www.youtube.com/{channel_handle}/live"
-        self._log(f"Checking {live_url} for active streams (no API quota)")
+        streams_url = f"https://www.youtube.com/{channel_handle}/streams"
+        self._log(f"Scanning {streams_url} for live streams (full extraction, max 15 entries)")
 
         try:
             yt_dlp_path = self._find_ytdlp_binary()
@@ -1975,8 +1979,8 @@ class Plugin:
                 "--dump-json",
                 "--no-warnings",
                 "--ignore-errors",
-                "--no-playlist",
-                live_url,
+                "--playlist-end", "15",
+                streams_url,
             ]
 
             if self._qjs_path:
@@ -1986,11 +1990,11 @@ class Plugin:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=120,
             )
 
             if result.returncode != 0 and not result.stdout:
-                self._log(f"No live stream found for {channel_handle} (yt-dlp exit {result.returncode})")
+                self._log(f"No streams found for {channel_handle} (yt-dlp exit {result.returncode})")
                 return []
 
             live_streams = []
@@ -2004,7 +2008,7 @@ class Plugin:
                     is_live = is_live_field or live_status == "is_live"
 
                     if not is_live:
-                        self._log(f"{channel_handle}: resolved video not live (live_status={live_status})")
+                        self._log(f"{channel_handle}: skipping non-live entry (live_status={live_status})")
                         continue
 
                     video_id = entry.get("id")
@@ -2019,10 +2023,10 @@ class Plugin:
             return live_streams
 
         except subprocess.TimeoutExpired:
-            self._log_error(f"yt-dlp timed out checking {channel_handle}/live")
+            self._log_error(f"yt-dlp timed out scanning {channel_handle}/streams")
             return None
         except Exception as exc:
-            self._log_error(f"yt-dlp error checking {channel_handle}/live: {exc}")
+            self._log_error(f"yt-dlp error scanning {channel_handle}/streams: {exc}")
             return None
 
     def _extract_username_map(self, raw: str) -> Dict[str, str]:
