@@ -1397,9 +1397,12 @@ class Plugin:
                 except ValueError:
                     pass
 
-        # Find the first available decimal slot starting from 1
+        # Find the first available decimal slot starting from 1.
+        # Skip multiples of 10: float("9000.10") == 9000.1, float("9000.20") == 9000.2, etc.
+        # Trailing zeros collapse in float representation, causing slot collisions.
+        # Slot 11 is fine (9000.11 = 9000 + 11/100, distinct from 9000.1).
         next_decimal = 1
-        while next_decimal in occupied:
+        while next_decimal in occupied or next_decimal % 10 == 0:
             next_decimal += 1
 
         return float(f"{base_number}.{next_decimal}")
